@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: BotNotificationController.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: BotNotificationController.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>const fileSystem = require("fs");
+const path = require("path");
+const request = require("request");
+
+/**
+ * Url of the api that sends notification to Slack.
+ * @constant
+ * @default
+ * @type {String}
+ */
+const URL_API_SEND_NOTIFICATION = `https://bot-quanyx-slack.diogoribeiro15.repl.co/sendNotification`;
+/**
+ * @constant
+ * @default
+ * @type {String}
+ */
+const BOT_NOTIFICATION_DB_FILE = path.resolve(__dirname, "bot_notification_db.json");
+
+//const TWENTY_MINUTES = 1200000;
+const TWENTY_MINUTES = 20000;
+
+/**
+ * Class representing a conversation
+ * @class
+ */
+class Conversation {
+
+    /**
+     * @constructor
+     * @param {String} userId - id of the user who is interacting with the platform
+     * @param {String} message - message sent by the user
+     * @param {Object} interval - object returned by setTimeout
+     * @param {Date} date - date that the message was sent
+     */
+    constructor(userId, message, interval, date = new Date(), sentNotificationTwentyMinutes = false) {
+        this.userId = userId;
+        this.message = message;
+        this.interval = interval;
+        this.date = date;
+        // If sentNotificationTwentyMinutes is false then the message not send.
+        this.sentNotificationTwentyMinutes = sentNotificationTwentyMinutes;
+    }
+}
+
+/**
+ * Array that stores the conversations.
+ * @type {Array}
+ */
+let global_conversation = [];
+
+if (global_conversation.length == 0) {
+    const backupArray = JSON.parse(readBotNotificationDbFile());
+
+    let dateCurrent = new Date();
+    for (let backup of backupArray) {
+        const conversation = new Conversation(
+            backup.userId,
+            backup.message,
+            backup.interval,
+            new Date(backup.date),
+            backup.sentNotificationTwentyMinutes
+        );
+
+        //Do not change the position of this variable
+        global_conversation.push(conversation);
+
+        if (conversation.sentNotificationTwentyMinutes == false) {
+            let dateLastStored = conversation.date;
+            let timeDiff = Math.abs(dateCurrent.getTime() - dateLastStored.getTime());
+
+            if (timeDiff >= TWENTY_MINUTES) {
+                createAlertInMinutes(conversation.userId, conversation.message, 0);
+
+            } else {
+                createAlertInMinutes(conversation.userId, conversation.message, timeDiff);
+            }
+        }
+
+    }
+
+
+}
+
+/**
+ * Class representing a type of response to be sent
+ * @class
+ */
+class NotificationResponse {
+    /**
+     * @static
+     */
+    static notificationType = {
+        FIRST_ABSOLUTE_INTERACTION: 1,
+        FIRST_INTERACTION_OF_THE_DAY: 2,
+        FIRST_INTERACTION_AFTER_THREE_DAYS: 3,
+        NULL: 4
+    };
+
+    /**
+     * @constructor
+     * @param {Boolean} shouldSendNotification - Boolean that identifies whether to notify
+     * @param {Number} notificationType - Type of notification that will be sent
+     */
+    constructor(shouldSendNotification, notificationType) {
+        const exists = Object.values(NotificationResponse.notificationType).includes(notificationType)
+        if (!exists) {
+            throw new Error("Notification type does not exists");
+        }
+
+        this.shouldSendNotification = shouldSendNotification;
+        this.notificationType = notificationType;
+    }
+}
+
+/**
+ * Main function. It checks which notification should be sent to Slack.
+ * @param {String} userId - id of the user who is interacting with the platform
+ * @param {String} message - message sent by the user
+ * @returns {NotificationResponse}
+ */
+function updateConversationInGlobalConversation(userId, message) {
+    const index = findConversationIndexByUserIdInGlobalConversation(userId);
+
+    const existUser = index !== -1;
+    if (existUser) {
+        const oldConversation = getConversationByIndexInGlobalConversation(index);
+
+        removeAlertTwentyMinutes(index);
+        const interval = createAlertInMinutes(userId, message);
+        const newConversation = new Conversation(userId, message, interval);
+        updateConversationByIndexInGlobalConversation(index, newConversation);
+
+        const copy = copyGlobalConversationArrayWithoutIntervalProperty();
+        saveGlobalConversationArrayInFileJson(JSON.stringify(copy));
+
+        if (existLastIterationWithTheBotIsMoreThanThreeDays(oldConversation)) {
+            return new NotificationResponse(
+                true,
+                NotificationResponse.notificationType.FIRST_INTERACTION_AFTER_THREE_DAYS
+            );
+        }
+
+        if (isFirstDayInteraction(oldConversation)) {
+            return new NotificationResponse(
+                true,
+                NotificationResponse.notificationType.FIRST_INTERACTION_OF_THE_DAY
+            );
+        }
+
+        return new NotificationResponse(
+            false,
+            NotificationResponse.notificationType.NULL
+        );
+
+    } else {
+        const interval = createAlertInMinutes(userId, message);
+        const conversation = new Conversation(userId, message, interval);
+        addNewConversationInGlobalConversation(conversation);
+
+        const copy = copyGlobalConversationArrayWithoutIntervalProperty();
+        saveGlobalConversationArrayInFileJson(JSON.stringify(copy));
+
+        return new NotificationResponse(
+            true,
+            NotificationResponse.notificationType.FIRST_ABSOLUTE_INTERACTION
+        );
+    }
+
+}
+
+/**
+ * Searches the conversation for the user id in the global_conversation array. If it finds it returns the user index, otherwise it returns -1.
+ * @param {String} userId - id of the user who is interacting with the platform
+ * @returns {Number}
+ */
+function findConversationIndexByUserIdInGlobalConversation(userId) {
+    const index = global_conversation.findIndex((conversation) => {
+        return conversation.userId == userId;
+    });
+
+    return index
+}
+
+/**
+ * Restart the time of the setTimeOut() function if the user exists in the array. It also removes the user data that is contained in the returned index.
+ * @param {Number} index - User index in global_conversation array
+ */
+function removeAlertTwentyMinutes(index) {
+    const conversation = getConversationByIndexInGlobalConversation(index)
+    clearTimeout(conversation.interval);
+    console.log(`Removed alert ${conversation.userId}`);
+}
+
+/**
+ * It replaces the previous data, with new data sent by the user.
+ * @param {Number} index - user index in global_conversation array
+ * @param {Conversation} conversation - class representing a conversation
+ */
+function updateConversationByIndexInGlobalConversation(index, conversation) {
+    global_conversation[index] = conversation;
+    console.log("Updated conversation: ", index);
+}
+
+/**
+ * Returns the "interval" variable that receives the setTimeOut() function. It is important to mention that the setTimeOut() function is started the moment the variable "interval" is entered into the array.
+ * @param {String} userId - id of the user who is interacting with the platform
+ * @param {String} message - message sent by the user
+ * @returns {number}
+ */
+function createAlertInMinutes(userId, message, minutes = TWENTY_MINUTES) {
+
+    let interval = setTimeout(() => {
+        const index = findConversationIndexByUserIdInGlobalConversation(userId);
+        const oldConversation = getConversationByIndexInGlobalConversation(index);
+        const newConversation = new Conversation(
+            oldConversation.userId,
+            oldConversation.message,
+            oldConversation.interval,
+            oldConversation.date,
+            true
+        );
+
+        updateConversationByIndexInGlobalConversation(index, newConversation);
+
+        const copy = copyGlobalConversationArrayWithoutIntervalProperty();
+        saveGlobalConversationArrayInFileJson(JSON.stringify(copy));
+
+        const notification = {
+            userId: userId,
+            user_message: message,
+            notification_text: "Last interaction after twenty minutes"
+        };
+
+        triggerBotNotification(notification);
+
+    }, minutes, userId, message);
+
+    return interval;
+}
+
+/**
+ * Saves the user data in the global_conversation array.
+ * @param {Conversation} conversation - class representing a conversation
+ */
+function addNewConversationInGlobalConversation(conversation) {
+    global_conversation.push(conversation);
+    console.log(`Added new conversation: ${conversation}`);
+}
+
+/**
+ * Returns the user data, if any, that is saved in the global_conversation array.
+ * @param {Number} index - user index in global_conversation array
+ * @throws {Error}
+ * @returns {Conversation}
+ */
+function getConversationByIndexInGlobalConversation(index) {
+    if (global_conversation[index]) {
+        return global_conversation[index];
+    }
+
+    throw new Error("Conversation not found");
+}
+
+/**
+ * Send notification
+ * @param {Object} payload - received object that contains information from the user's interactions
+ * @param {String} payload.userId - id of the user who is interacting with the platform
+ * @param {String} payload.user_message - message sent by the user
+ * @param {String} payload.notification_text - body of the message to be sent in the notification
+ */
+function triggerBotNotification(payload) {
+
+    const url = {
+        url: URL_API_SEND_NOTIFICATION,
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+    };
+
+    /**
+     * @callback
+        * @param error
+     * @param response
+     * @param body
+     */
+    const callback = function (error, response, body) {
+        if (error) {
+            console.error("Error to send notification: ", error);
+        }
+
+        if (response) {
+            console.log(`Success to send notification: User Id: ${payload.userId}. Message: ${payload.user_message}. Problem: ${payload.notification_text}`);
+        }
+    }
+
+    request.get(url, callback, null);
+}
+
+/**
+ * Checks if the current message happened after three days from the last message sent.
+ * @param {Conversation} oldConversation - previous conversation stored before the current interaction
+ * @returns {boolean}
+ */
+function existLastIterationWithTheBotIsMoreThanThreeDays(oldConversation) {
+    let dateCurrent = new Date();
+    let dateSaveInArray = new Date(oldConversation.date);
+    let timeDiff = Math.abs(dateSaveInArray.getTime() - dateCurrent.getTime());
+    let diffDays = Math.ceil(timeDiff / (1000 * 3600 * 24));
+
+    if (diffDays > 3) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * This function checks if it is the first interaction of the day with the bot.
+ * @param {Conversation} oldConversation - previous conversation stored before the current interaction
+ * @returns {boolean}
+ */
+function isFirstDayInteraction(oldConversation) {
+    const dateNow = new Date();
+    dateNow.setUTCHours(0);
+    dateNow.setUTCMinutes(0);
+    dateNow.setUTCSeconds(0);
+    dateNow.setUTCMilliseconds(0);
+
+    const oldDate = new Date(oldConversation.date);
+    oldDate.setUTCHours(0);
+    oldDate.setUTCMinutes(0);
+    oldDate.setUTCSeconds(0);
+    oldDate.setUTCMilliseconds(0);
+
+    if (String(dateNow) == String(oldDate)) {
+        return false;
+    }
+    return true;
+}
+
+/**
+ *
+ * copyGlobalConversationArrayWithoutIntervalProperty
+ */
+function copyGlobalConversationArrayWithoutIntervalProperty() {
+
+    let global_conversation_copy = [];
+    for (let conversation of global_conversation) {
+        global_conversation_copy.push(
+            new Conversation(
+                conversation.userId,
+                conversation.message,
+                null,
+                conversation.date,
+                conversation.sentNotificationTwentyMinutes
+            )
+        );
+    }
+
+    return global_conversation_copy;
+}
+
+/**
+ * @function
+ * @param {String} arrayInString - array to be stored in the JSON file
+ */
+function saveGlobalConversationArrayInFileJson(arrayInString) {
+    fileSystem.writeFileSync(BOT_NOTIFICATION_DB_FILE, arrayInString);
+}
+
+/**
+ * @function
+ * @returns {String}
+ */
+function readBotNotificationDbFile() {
+    if (fileSystem.existsSync(BOT_NOTIFICATION_DB_FILE)) {
+        return fileSystem.readFileSync(BOT_NOTIFICATION_DB_FILE).toString();
+    }
+
+    return JSON.stringify([]);
+}
+
+module.exports.BotNotificationController = {
+    updateConversationInGlobalConversation,
+    NotificationResponse,
+    triggerBotNotification
+};</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Conversation.html">Conversation</a></li><li><a href="NotificationResponse.html">NotificationResponse</a></li></ul><h3>Global</h3><ul><li><a href="global.html#addNewConversationInGlobalConversation">addNewConversationInGlobalConversation</a></li><li><a href="global.html#BOT_NOTIFICATION_DB_FILE">BOT_NOTIFICATION_DB_FILE</a></li><li><a href="global.html#copyGlobalConversationArrayWithoutIntervalProperty">copyGlobalConversationArrayWithoutIntervalProperty</a></li><li><a href="global.html#createAlertInMinutes">createAlertInMinutes</a></li><li><a href="global.html#existLastIterationWithTheBotIsMoreThanThreeDays">existLastIterationWithTheBotIsMoreThanThreeDays</a></li><li><a href="global.html#findConversationIndexByUserIdInGlobalConversation">findConversationIndexByUserIdInGlobalConversation</a></li><li><a href="global.html#getConversationByIndexInGlobalConversation">getConversationByIndexInGlobalConversation</a></li><li><a href="global.html#global_conversation">global_conversation</a></li><li><a href="global.html#isFirstDayInteraction">isFirstDayInteraction</a></li><li><a href="global.html#readBotNotificationDbFile">readBotNotificationDbFile</a></li><li><a href="global.html#removeAlertTwentyMinutes">removeAlertTwentyMinutes</a></li><li><a href="global.html#saveGlobalConversationArrayInFileJson">saveGlobalConversationArrayInFileJson</a></li><li><a href="global.html#triggerBotNotification">triggerBotNotification</a></li><li><a href="global.html#updateConversationByIndexInGlobalConversation">updateConversationByIndexInGlobalConversation</a></li><li><a href="global.html#updateConversationInGlobalConversation">updateConversationInGlobalConversation</a></li><li><a href="global.html#URL_API_SEND_NOTIFICATION">URL_API_SEND_NOTIFICATION</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.11</a> on Tue Aug 16 2022 20:28:50 GMT-0400 (Horário Padrão do Amazonas)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
