@@ -47,6 +47,11 @@ const BOT_NOTIFICATION_DB_FILE = path.resolve(__dirname, "bot_notification_db.js
 //const TWENTY_MINUTES = 1200000;
 const TWENTY_MINUTES = 20000;
 
+const interactionChannel = {
+    SLACK: "Slack",
+    TEAMS: "Teams"
+};
+
 /**
  * Class representing a conversation
  * @class
@@ -59,11 +64,16 @@ class Conversation {
      * @param {String} message - message sent by the user
      * @param {Object} interval - object returned by setTimeout
      * @param {Date} date - date that the message was sent
+     * @param {interactionChannel} interactionChannel
      */
-    constructor(userId, message, interval, date = new Date(), sentNotificationTwentyMinutes = false) {
+    constructor(userId, message, interval, interactionChannel, date = new Date(), sentNotificationTwentyMinutes = false) {
+        if (!interactionChannel) {
+            throw new Error("Interaction not defined")
+        }
         this.userId = userId;
         this.message = message;
         this.interval = interval;
+        this.interactionChannel = interactionChannel
         this.date = date;
         // If sentNotificationTwentyMinutes is false then the message not send.
         this.sentNotificationTwentyMinutes = sentNotificationTwentyMinutes;
@@ -85,24 +95,26 @@ if (global_conversation.length == 0) {
             backup.userId,
             backup.message,
             backup.interval,
+            backup.interactionChannel,
             new Date(backup.date),
             backup.sentNotificationTwentyMinutes
         );
 
-        //Do not change the position of this variable
-        global_conversation.push(conversation);
-
+        let interval = null
         if (conversation.sentNotificationTwentyMinutes == false) {
             let dateLastStored = conversation.date;
             let timeDiff = Math.abs(dateCurrent.getTime() - dateLastStored.getTime());
 
             if (timeDiff >= TWENTY_MINUTES) {
-                createAlertInMinutes(conversation.userId, conversation.message, 0);
+                interval = createAlertInMinutes(conversation.userId, conversation.message, 0);
 
             } else {
-                createAlertInMinutes(conversation.userId, conversation.message, timeDiff);
+                interval = createAlertInMinutes(conversation.userId, conversation.message, TWENTY_MINUTES - timeDiff);
             }
         }
+
+        conversation.interval =  interval
+        global_conversation.push(conversation);
 
     }
 
@@ -144,9 +156,10 @@ class NotificationResponse {
  * Main function. It checks which notification should be sent to Slack.
  * @param {String} userId - id of the user who is interacting with the platform
  * @param {String} message - message sent by the user
+ * @param {interactionChannel} interactionChannel
  * @returns {NotificationResponse}
  */
-function updateConversationInGlobalConversation(userId, message) {
+function updateConversationInGlobalConversation(userId, message, interactionChannel) {
     const index = findConversationIndexByUserIdInGlobalConversation(userId);
 
     const existUser = index !== -1;
@@ -155,7 +168,7 @@ function updateConversationInGlobalConversation(userId, message) {
 
         removeAlertTwentyMinutes(index);
         const interval = createAlertInMinutes(userId, message);
-        const newConversation = new Conversation(userId, message, interval);
+        const newConversation = new Conversation(userId, message, interval, interactionChannel);
         updateConversationByIndexInGlobalConversation(index, newConversation);
 
         const copy = copyGlobalConversationArrayWithoutIntervalProperty();
@@ -182,7 +195,7 @@ function updateConversationInGlobalConversation(userId, message) {
 
     } else {
         const interval = createAlertInMinutes(userId, message);
-        const conversation = new Conversation(userId, message, interval);
+        const conversation = new Conversation(userId, message, interval, interactionChannel);
         addNewConversationInGlobalConversation(conversation);
 
         const copy = copyGlobalConversationArrayWithoutIntervalProperty();
@@ -244,6 +257,7 @@ function createAlertInMinutes(userId, message, minutes = TWENTY_MINUTES) {
             oldConversation.userId,
             oldConversation.message,
             oldConversation.interval,
+            oldConversation.interactionChannel,
             oldConversation.date,
             true
         );
@@ -256,7 +270,8 @@ function createAlertInMinutes(userId, message, minutes = TWENTY_MINUTES) {
         const notification = {
             userId: userId,
             user_message: message,
-            notification_text: "Last interaction after twenty minutes"
+            notification_text: "Last interaction after twenty minutes",
+            interaction_channel: newConversation.interactionChannel
         };
 
         triggerBotNotification(notification);
@@ -378,6 +393,7 @@ function copyGlobalConversationArrayWithoutIntervalProperty() {
                 conversation.userId,
                 conversation.message,
                 null,
+                conversation.interactionChannel,
                 conversation.date,
                 conversation.sentNotificationTwentyMinutes
             )
@@ -407,10 +423,38 @@ function readBotNotificationDbFile() {
     return JSON.stringify([]);
 }
 
+/**
+ *
+ * @param userId - id of the user who is interacting with the platform
+ */
+function removeAlertIfFlowPointIsFeedback(userId) {
+    const index = findConversationIndexByUserIdInGlobalConversation(userId);
+    removeAlertTwentyMinutes(index);
+
+    const oldConversation = getConversationByIndexInGlobalConversation(index);
+    const newConversation = new Conversation(
+        oldConversation.userId,
+        oldConversation.message,
+        oldConversation.interval,
+        oldConversation.interactionChannel,
+        oldConversation.date,
+        true
+    );
+
+    updateConversationByIndexInGlobalConversation(index, newConversation);
+    console.log(newConversation)
+
+    const copy = copyGlobalConversationArrayWithoutIntervalProperty();
+    saveGlobalConversationArrayInFileJson(JSON.stringify(copy));
+}
+
+
 module.exports.BotNotificationController = {
     updateConversationInGlobalConversation,
     NotificationResponse,
-    triggerBotNotification
+    triggerBotNotification,
+    interactionChannel,
+    removeAlertIfFlowPointIsFeedback
 };</code></pre>
         </article>
     </section>
@@ -421,13 +465,13 @@ module.exports.BotNotificationController = {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Conversation.html">Conversation</a></li><li><a href="NotificationResponse.html">NotificationResponse</a></li></ul><h3>Global</h3><ul><li><a href="global.html#addNewConversationInGlobalConversation">addNewConversationInGlobalConversation</a></li><li><a href="global.html#BOT_NOTIFICATION_DB_FILE">BOT_NOTIFICATION_DB_FILE</a></li><li><a href="global.html#copyGlobalConversationArrayWithoutIntervalProperty">copyGlobalConversationArrayWithoutIntervalProperty</a></li><li><a href="global.html#createAlertInMinutes">createAlertInMinutes</a></li><li><a href="global.html#existLastIterationWithTheBotIsMoreThanThreeDays">existLastIterationWithTheBotIsMoreThanThreeDays</a></li><li><a href="global.html#findConversationIndexByUserIdInGlobalConversation">findConversationIndexByUserIdInGlobalConversation</a></li><li><a href="global.html#getConversationByIndexInGlobalConversation">getConversationByIndexInGlobalConversation</a></li><li><a href="global.html#global_conversation">global_conversation</a></li><li><a href="global.html#isFirstDayInteraction">isFirstDayInteraction</a></li><li><a href="global.html#readBotNotificationDbFile">readBotNotificationDbFile</a></li><li><a href="global.html#removeAlertTwentyMinutes">removeAlertTwentyMinutes</a></li><li><a href="global.html#saveGlobalConversationArrayInFileJson">saveGlobalConversationArrayInFileJson</a></li><li><a href="global.html#triggerBotNotification">triggerBotNotification</a></li><li><a href="global.html#updateConversationByIndexInGlobalConversation">updateConversationByIndexInGlobalConversation</a></li><li><a href="global.html#updateConversationInGlobalConversation">updateConversationInGlobalConversation</a></li><li><a href="global.html#URL_API_SEND_NOTIFICATION">URL_API_SEND_NOTIFICATION</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="Conversation.html">Conversation</a></li><li><a href="NotificationResponse.html">NotificationResponse</a></li></ul><h3>Global</h3><ul><li><a href="global.html#addNewConversationInGlobalConversation">addNewConversationInGlobalConversation</a></li><li><a href="global.html#BOT_NOTIFICATION_DB_FILE">BOT_NOTIFICATION_DB_FILE</a></li><li><a href="global.html#copyGlobalConversationArrayWithoutIntervalProperty">copyGlobalConversationArrayWithoutIntervalProperty</a></li><li><a href="global.html#createAlertInMinutes">createAlertInMinutes</a></li><li><a href="global.html#existLastIterationWithTheBotIsMoreThanThreeDays">existLastIterationWithTheBotIsMoreThanThreeDays</a></li><li><a href="global.html#findConversationIndexByUserIdInGlobalConversation">findConversationIndexByUserIdInGlobalConversation</a></li><li><a href="global.html#getConversationByIndexInGlobalConversation">getConversationByIndexInGlobalConversation</a></li><li><a href="global.html#global_conversation">global_conversation</a></li><li><a href="global.html#isFirstDayInteraction">isFirstDayInteraction</a></li><li><a href="global.html#readBotNotificationDbFile">readBotNotificationDbFile</a></li><li><a href="global.html#removeAlertIfFlowPointIsFeedback">removeAlertIfFlowPointIsFeedback</a></li><li><a href="global.html#removeAlertTwentyMinutes">removeAlertTwentyMinutes</a></li><li><a href="global.html#saveGlobalConversationArrayInFileJson">saveGlobalConversationArrayInFileJson</a></li><li><a href="global.html#triggerBotNotification">triggerBotNotification</a></li><li><a href="global.html#updateConversationByIndexInGlobalConversation">updateConversationByIndexInGlobalConversation</a></li><li><a href="global.html#updateConversationInGlobalConversation">updateConversationInGlobalConversation</a></li><li><a href="global.html#URL_API_SEND_NOTIFICATION">URL_API_SEND_NOTIFICATION</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.11</a> on Tue Aug 16 2022 20:28:50 GMT-0400 (Horário Padrão do Amazonas)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 3.6.11</a> on Mon Aug 22 2022 22:16:11 GMT-0400 (Horário Padrão do Amazonas)
 </footer>
 
 <script> prettyPrint(); </script>
